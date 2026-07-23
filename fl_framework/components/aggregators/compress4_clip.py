@@ -1,0 +1,302 @@
+# fl_framework/components/aggregators/compress.py
+
+import math
+from typing import List, Tuple
+import torch
+# from pytorch_model_summary import summary # 此库在提供代码中未使用，如果其他地方没有用，可以移除。
+
+from .base_aggregator import BaseAggregator
+
+class CompressAggregator(BaseAggregator):
+    # 修改一：在__init__中添加 byzantine_alpha 参数
+    def __init__(self, m: int, r: int, k: int, krum_remain: float, byzantine_alpha: float): # 添加 k 和 byzantine_alpha 参数
+        self.m = m
+        self.r = r
+        self.k = k # K: 每次迭代中保留的行数 (用于FABA后的Top-K选择)
+        self.krum_remain = krum_remain
+        self.byzantine_alpha = byzantine_alpha # α: 假设的拜占庭工作者比例 (用于 FABA)
+        self.d = None  # Total flattened gradient dimension (for a single client)
+        self.n = None  # Number of columns for G_i matrix: d / m
+        self.V = None  # Random projection matrix V (shape n x r)
+        self.reference_shapes = None # Stores original gradient shapes for unflattening
+
+        # 用于存储客户端的原始 G_i 矩阵，以便在选择 I_t 后模拟客户端的第二阶段压缩
+        # 注意: 在实际分布式设置中，服务器不会直接拥有这些，而是客户端在收到 I_t 后自行计算并发送稀疏梯度。
+        self._cached_client_G_matrices: List[torch.Tensor] = []
+
+        # 检查 byzantine_alpha 的有效性，FABA 论文假设 alpha < 0.5
+        if not (0 <= self.byzantine_alpha < 0.5):
+            # 允许 alpha = 0 表示不使用 FABA，但如果超出 (0, 0.5) 范围则给出警告
+            if self.byzantine_alpha != 0:
+                print(f"警告: byzantine_alpha ({self.byzantine_alpha}) 超出了 FABA 论文建议的严格范围 (0 <= α < 0.5)。")
+
+    def _flatten_gradients(self, gradients_per_layer: List[torch.Tensor]) -> torch.Tensor:
+        return torch.cat([g.view(-1) for g in gradients_per_layer])
+
+    def _unflatten_gradients(self, flattened_gradient: torch.Tensor, ref_shapes: List[torch.Size]) -> List[torch.Tensor]:
+        if not ref_shapes:
+            return []
+        unflattened = []
+        current_idx = 0
+        for shape in ref_shapes:
+            num_elements = shape.numel()
+            if current_idx + num_elements > flattened_gradient.numel():
+                raise ValueError("Flattened gradient has insufficient elements for unflattening with provided shapes.")
+            unflattened.append(flattened_gradient[current_idx : current_idx + num_elements].view(shape))
+            current_idx += num_elements
+        return unflattened
+
+    def _get_projection_matrix_V(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if self.V is None:
+            if self.n is None:
+                raise RuntimeError("无法生成 V；'n' (梯度矩阵列数) 未设置。请先调用 aggregate 方法。")
+            self.V = torch.randn(self.n, self.r, device=device, dtype=dtype)
+            print(f"生成的投影矩阵 V 形状: {self.V.shape}")
+        return self.V
+
+    @torch.no_grad()
+    def aggregate(
+        self,
+        all_gradients: List[List[torch.Tensor]]
+    ) -> List[torch.Tensor]:
+        """
+        严格按照 ARC-Top-K 论文 (算法 1) 的流程聚合梯度。
+        集成了 FABA (Fast Aggregation against Byzantine Attacks) 算法进行拜占庭节点过滤。
+
+        Args:
+            all_gradients (List[List[torch.Tensor]]): 一个列表，其中每个内部列表
+                包含单个客户端的每层梯度。这些是客户端的原始梯度。
+
+        Returns:
+            List[torch.Tensor]: 聚合后的稀疏梯度，已解展平回原始模型的层梯度列表。
+        """
+        if not all_gradients:
+            print("警告: 收到空梯度列表，返回空列表。")
+            return []
+        
+        num_initial_clients = len(all_gradients) # 存储初始客户端数量
+        if num_initial_clients == 0:
+            print("警告: 收到空梯度列表，返回空列表。")
+            return []
+
+        ref_client_grad_layers = all_gradients[0]
+        if not ref_client_grad_layers:
+            print("警告: 第一个客户端的梯度列表为空，返回空列表。")
+            return []
+
+        device = ref_client_grad_layers[0].device
+        dtype = ref_client_grad_layers[0].dtype
+
+        # ======================================================================
+        # 阶段 0: 初始化/参数检查 (服务器端)
+        # ======================================================================
+        num_to_remove_potential = int(self.byzantine_alpha * num_initial_clients)
+        self.reference_shapes = [g.shape for g in ref_client_grad_layers]
+        if self.d is None:
+            flattened_grad_ref = self._flatten_gradients(ref_client_grad_layers)
+            self.d = flattened_grad_ref.numel()
+            print(f"DEBUG: Actual total gradient dimension (d): {self.d}")
+            
+            # --- 以下是计算 d 的因子的代码，请一并添加 ---
+            def get_factors(n):
+                factors = set()
+                for i in range(1, int(math.sqrt(n)) + 1):
+                    if n % i == 0:
+                        factors.add(i)
+                        factors.add(n // i)
+                return sorted(list(factors))
+
+            factors_of_d = get_factors(self.d)
+            print(f"DEBUG: Factors of d: {factors_of_d}")
+            # --- 因子计算代码结束 ---
+
+            if self.d % self.m != 0:
+                raise ValueError(f"梯度总维度 d ({self.d}) 必须能被重塑行数 m ({self.m}) 整除。")
+            self.n = self.d // self.m
+            
+            # 检查 K 是否有效
+            if self.k > self.m:
+                raise ValueError(f"Top-K (k={self.k}) 不能大于重塑矩阵的行数 m ({self.m})。")
+            
+            print(f"初始化聚合器 (ARC-Top-K {'+ FABA' if self.byzantine_alpha > 0 else ''}): d={self.d}, m={self.m}, n={self.n}, r={self.r}, k={self.k}, byzantine_alpha={self.byzantine_alpha}")
+        
+        V = self._get_projection_matrix_V(device, dtype)
+        # 注意: 这里的 _cached_client_G_matrices 将在 FABA 过滤阶段被复制并修改。
+        # 此处清空是为了确保每次聚合都从干净状态开始。
+        self._cached_client_G_matrices = [] 
+
+        collected_projections_P_i = [] # 用于存储每个客户端的 P_t^(i) 矩阵 (未经 FABA 过滤)
+
+        # ======================================================================
+        # 阶段 1: 客户端局部投影 (模拟在服务器上完成)
+        # 服务器收集 P_t^(i) 并缓存 G_t^(i) 以备后用
+        # ======================================================================
+        for i, client_grad_layers in enumerate(all_gradients):
+            if len(client_grad_layers) != len(self.reference_shapes):
+                raise ValueError(f"客户端 {i} 的梯度层数不一致。期望 {len(self.reference_shapes)}，得到 {len(client_grad_layers)}。")
+
+            client_flat_grad = self._flatten_gradients(client_grad_layers)
+
+            if client_flat_grad.numel() != self.d:
+                raise ValueError(f"客户端 {i} 梯度维度不一致。期望 {self.d}，得到 {client_flat_grad.numel()}。")
+
+            # 1. 重塑为矩阵 G_t^(i) ∈ R^(m x n)
+            G_i = client_flat_grad.reshape(self.m, self.n)
+            self._cached_client_G_matrices.append(G_i) # 缓存原始 G_i 矩阵，稍后 FABA 会对复制的列表进行过滤
+
+            # 2. 梯度投影: P_t^(i) ← G_t^(i) V
+            P_i = math.sqrt(self.r) * torch.matmul(G_i, V) # P_i 形状为 (m, r)
+            collected_projections_P_i.append(P_i.reshape(-1))
+
+        if not collected_projections_P_i:
+            print("警告: 投影列表为空，返回空列表。")
+            return []
+
+        ## multi-krum
+        # collected_projections_P_i = [self._flatten_gradients(g) for g in all_gradients]  # ori krum
+        stack_proj = torch.stack(collected_projections_P_i, dim=0) # 形状为 (n, m * r)
+        dist = torch.cdist(stack_proj, stack_proj, p=2) ** 2 # 计算所有客户端之间的距离矩阵
+        top_k_dists, _ = torch.topk(dist, num_initial_clients - num_to_remove_potential - 1, dim=1, largest=False)
+        scores = torch.sum(top_k_dists, dim=1)
+
+        _, selected_indices = torch.topk(scores, int(num_initial_clients * self.krum_remain), largest=False)
+        current_P_i_list = [collected_projections_P_i[idx].reshape(self.m, self.r) for idx in selected_indices]
+        # agg_grad = torch.stack(current_P_i_list, dim=0).mean(dim=0)
+        # return self._unflatten_gradients(agg_grad, self.reference_shapes)
+
+
+        # ======================================================================
+        # 阶段 2: 服务器端选择重要行 (现在基于 multi-krum 过滤后的投影)
+        # ======================================================================
+        P_t = torch.stack(current_P_i_list).mean(dim=0) # P_t 形状为 (m, r)
+
+        # 2. 计算每行的重要性分数 Σ_t = diag(P_t P_t^T)
+        sigma_t = torch.diag(torch.matmul(P_t, P_t.T)) # sigma_t 形状为 (m,)
+
+        # 3. 选择 K 个最重要的行索引 I_t
+        _, topk_indices_It = torch.topk(sigma_t, self.k) # topk_indices_It 形状为 (k,)
+        # 确保索引是有序的，虽然不是严格要求，但有助于后续处理和调试
+        topk_indices_It = topk_indices_It.sort().values
+
+
+        # ======================================================================
+        # 阶段 3: 客户端局部压缩 (模拟在服务器上完成)
+        # ======================================================================
+        collected_sparse_flat_grads_honest = [] # 用于存储每个客户端的 Clocal(g_t^(i)) 稀疏向量
+        collected_sparse_flat_grads_byz = [] # 用于存储每个客户端的 Clocal(g_t^(i)) 稀疏向量
+
+        # 修改二：###去掉byzantine客户端，只保留诚实节点
+        for idx in range(len(self._cached_client_G_matrices)): # 使用 FABA 过滤后的 G_i 矩阵
+            G_i_original = self._cached_client_G_matrices[idx]
+            # 创建一个全零矩阵，用于存储局部压缩后的 G 
+            Clocal_G_i = torch.zeros_like(G_i_original, device=device, dtype=dtype)
+            
+            # 将 I_t 对应行的原始梯度复制到 Clocal_G_i
+            Clocal_G_i[topk_indices_It, :] = G_i_original[topk_indices_It, :]
+
+            # 将 Clocal_G_i 展平为稀疏向量 Clocal(g_t^(i))
+            Clocal_flat_grad_i = Clocal_G_i.view(-1) # 形状 (d,)
+
+            if idx in selected_indices:
+                collected_sparse_flat_grads_honest.append(Clocal_flat_grad_i)
+            else:
+                collected_sparse_flat_grads_byz.append(Clocal_flat_grad_i)
+
+        self._cached_client_G_matrices.clear() # 清空原始缓存 (_cached_client_G_matrices)，释放内存
+
+        if not collected_sparse_flat_grads_honest:
+            print("警告: FABA 过滤后没有稀疏梯度可聚合，返回空列表。")
+            return []
+        
+        all_collected_sparse_flat_grads = collected_sparse_flat_grads_honest + collected_sparse_flat_grads_byz
+
+        # ======================================================================
+        # 阶段 4: 自适应鲁棒裁剪 (ARC)
+        # ======================================================================
+        clipped_honest_grads = []
+        
+        # 仅当有梯度需要处理时才执行裁剪
+        if all_collected_sparse_flat_grads:
+            # 步骤 1: 计算所有 n 个梯度的 L2 范数
+            all_norms = [torch.norm(g, p=2) for g in all_collected_sparse_flat_grads]
+            # 步骤 2: 根据范数大小对梯度进行降序排序 (我们只需要排序后的范数)
+            sorted_norms, _ = torch.sort(torch.stack(all_norms), descending=True)
+            # 步骤 3: 确定要裁剪掉的梯度数量 k
+            # n 是总客户端数，f 是假设的拜占庭节点数
+            n_total = num_initial_clients
+            f_byzantine = num_to_remove_potential
+            # ARC 论文中的公式 k = floor(2 * (f/n) * (n-f))
+            arc_k = math.floor(2 * (f_byzantine / n_total) * (n_total - f_byzantine))
+            
+            # 确保 k 在有效范围内
+            arc_k = min(arc_k, n_total - 1)
+            # 步骤 4: 将裁剪阈值 C_t 设为第 k+1 大的梯度范数
+            # 在 0-indexed 的排序列表中，第 k+1 个元素是索引为 k 的元素
+            clipping_threshold = sorted_norms[arc_k]
+            # 步骤 5: 使用动态阈值 C_t 对所有 n 个梯度进行裁剪
+            # 根据您的要求，我们只对被认为是诚实的梯度进行裁剪和后续聚合
+            for grad in collected_sparse_flat_grads_honest:
+                grad_norm = torch.norm(grad, p=2)
+                
+                # 计算裁剪比例，避免除以零
+                if grad_norm > 1e-9: # 使用一个很小的数来防止浮点数不稳定
+                    clipping_factor = min(1.0, clipping_threshold / grad_norm)
+                    clipped_grad = grad * clipping_factor
+                else:
+                    clipped_grad = grad # 如果梯度范数为0，则保持不变
+                
+                clipped_honest_grads.append(clipped_grad)
+        else:
+            # 如果没有诚实的梯度，则 clipped_honest_grads 保持为空
+            clipped_honest_grads = collected_sparse_flat_grads_honest
+
+
+        # ======================================================================
+        # 阶段 5: 服务器端聚合最终压缩梯度
+        # ======================================================================
+       
+        C_g_t_flat = torch.stack(clipped_honest_grads, dim=0).mean(dim=0)
+
+        # 将 C(g_t) 扁平向量解展平回原始层梯度列表
+        reconstructed_gradients = self._unflatten_gradients(C_g_t_flat, self.reference_shapes)
+
+        return reconstructed_gradients
+
+    def get_state(self) -> dict:
+        """
+        返回聚合器的当前状态，包括 m, r, k, byzantine_alpha, d, n, V 和 reference_shapes。
+        """
+        state = {
+            'm': self.m,
+            'r': self.r,
+            'k': self.k,
+            'byzantine_alpha': self.byzantine_alpha, # 新增 byzantine_alpha
+            'd': self.d,
+            'n': self.n,
+            'V': self.V,
+            'reference_shapes': self.reference_shapes
+        }
+        return state
+    
+    def set_state(self, state: dict):
+        """
+        设置聚合器的状态。
+        """
+        if state is None:
+            print("警告: 尝试设置空状态。聚合器将保持未初始化状态或当前状态。")
+            return
+
+        self.m = state.get('m', self.m) 
+        self.r = state.get('r', self.r)
+        self.k = state.get('k', self.k)
+        self.byzantine_alpha = state.get('byzantine_alpha', self.byzantine_alpha) # 新增 byzantine_alpha
+        self.d = state.get('d')
+        self.n = state.get('n')
+        self.V = state.get('V')
+        self.reference_shapes = state.get('reference_shapes')
+        
+        if self.d is not None and self.n is not None and self.V is not None and self.reference_shapes is not None:
+            print(f"CompressAggregator 状态已加载: d={self.d}, n={self.n}, r={self.r}, k={self.k}, byzantine_alpha={self.byzantine_alpha}, V 形状={self.V.shape}")
+        else:
+            print("警告: 状态部分加载，某些关键属性可能仍为 None。")
+

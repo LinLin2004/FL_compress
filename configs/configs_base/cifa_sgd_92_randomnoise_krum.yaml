@@ -1,0 +1,57 @@
+experiment:
+  name: cifa_sgd_92_randomnoise_krum
+  seed: 42
+  log_level: INFO
+  save_path: results_cifa_92_lr_0.001_30000/cifa_sgd_92_randomnoise_krum
+resources:
+  gpus:
+  - 0
+dataset:
+  batch_size: 16
+  train:
+    class_path: fl_framework.data.datasets.CIFAR10Dataset
+    params:
+      data_dir: data_cache
+      train: true
+  test:
+    class_path: fl_framework.data.datasets.CIFAR10Dataset
+    params:
+      data_dir: data_cache
+      train: false
+  partition:
+    iid: true
+    seed: 42
+model:
+  class_path: fl_framework.components.models.resnet_18_for_10.ResNet18For10
+  params:
+    in_channels: 3
+training:
+  rounds: 10
+  round_steps: 3000
+  test_loss_function:
+    class_path: torch.nn.CrossEntropyLoss
+  train_loss_function:
+    class_path: torch.nn.CrossEntropyLoss
+  metrics:
+  - class_path: fl_framework.utils.metrics.TopKAccuracy
+    params:
+      k: 1
+optimizer:
+  class_path: fl_framework.components.optimizers.sgd.SGD
+  params:
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 5.0e-4
+    lr_decay_rate: 0.1
+    lr_decay_milestone: [7]
+aggregator:
+  class_path: fl_framework.components.aggregators.krum.KrumAggregator
+  params:
+    num_byzantine: 4
+honest:
+  num_clients: 16
+byzantine:
+  num_clients: 4
+  attack:
+    class_path: fl_framework.components.attacks.random_noise.RandomNoiseAttack
+    params: {}

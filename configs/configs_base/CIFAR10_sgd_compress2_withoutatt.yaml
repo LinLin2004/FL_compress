@@ -1,0 +1,65 @@
+experiment:
+  name: mnist_katyusha_geometric_withoutatt
+  seed: 42
+  log_level: INFO
+  save_path: "./results_CIFAR10_920/sgd_compress2_withoutatt_lr_0.001_30000_16"
+resources:
+  gpus:
+  - 1
+dataset:
+  batch_size: 16
+  train:
+    class_path: fl_framework.data.datasets.CIFAR10Dataset
+    params:
+      data_dir: data_cache        # ← directory only
+      train: true
+  test:
+    class_path: fl_framework.data.datasets.CIFAR10Dataset
+    params:
+      data_dir: data_cache        # ← directory only
+      train: false
+  partition:            # 2 spaces ← MUST line up with “batch_size”
+    iid: true # 4 spaces
+    seed: 42
+
+model:
+  class_path: fl_framework.components.models.resnet_18_for_10.ResNet18For10
+  params:
+    in_channels: 3
+    
+
+training:
+  rounds: 10
+  round_steps: 3000
+  train_loss_function:
+      class_path: torch.nn.CrossEntropyLoss
+    # params:
+    #   label_smoothing: 0.1
+  test_loss_function:
+    class_path: torch.nn.CrossEntropyLoss
+  metrics:
+  - class_path: fl_framework.utils.metrics.TopKAccuracy
+    params:
+      k: 1
+optimizer:
+  class_path: fl_framework.components.optimizers.sgd.SGD
+  params:
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 5.0e-4
+    lr_decay_rate: 0.01
+    lr_decay_milestone: [7]
+aggregator:
+  class_path: fl_framework.components.aggregators.compress2.CompressAggregator
+  params:
+    m: 6
+    r: 4
+    k: 2
+    byzantine_alpha: 0.25 # <--- **新增 FABA 参数**
+honest:
+  num_clients: 6 # <--- **调整诚实客户端数量** (8 - 2 = 6)
+byzantine:
+  num_clients: 2 # <--- **调整恶意客户端数量** (8 - 6 = 2)
+  attack:
+    class_path: fl_framework.components.attacks.random_noise.RandomNoiseAttack
+    params: {}

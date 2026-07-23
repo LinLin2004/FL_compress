@@ -1,0 +1,64 @@
+aggregator:
+  class_path: fl_framework.components.aggregators.compress.CompressAggregator
+  params: # <-- 添加此部分
+      m: 410 
+      r: 4
+      k: 82
+byzantine:
+  attack:
+    class_path: fl_framework.components.attacks.sign_flipping.SignFlipping
+    params: {}
+  num_clients: 15
+dataset:
+  batch_size: 16
+  partition:
+    iid: true
+    seed: 42
+  test:
+    class_path: fl_framework.data.datasets.MNISTDataset
+    params:
+      data_dir: data_cache/mnist
+      train: false
+  train:
+    class_path: fl_framework.data.datasets.MNISTDataset
+    params:
+      data_dir: data_cache/mnist
+      train: true
+experiment:
+  log_level: INFO
+  name: mnist_sgd_mean_withoutatt
+  save_path: results_test_mnist_919_bz_50_lr_0.005_10000/mnist_sgd_mean_withoutatt
+  seed: 42
+honest:
+  num_clients: 75
+# model:
+#   class_path: fl_framework.components.models.single_layer_perceptron.SingleLayerPerceptron
+#   params:
+#     hidden_size: 32
+#     input_size: 784
+#     output_size: 10
+
+model:
+  class_path: fl_framework.components.models.resnet_18_for_10.ResNet18For10
+  params: 
+    in_channels: 1
+
+optimizer:
+  class_path: fl_framework.components.optimizers.sgd.SGD
+  params:
+    lr: 0.001
+    momentum: 0.0
+resources:
+  gpus:
+  - 0
+training:
+  metrics:
+  - class_path: fl_framework.utils.metrics.TopKAccuracy
+    params:
+      k: 1
+  round_steps: 1000
+  rounds: 10
+  test_loss_function:
+    class_path: torch.nn.CrossEntropyLoss
+  train_loss_function:
+    class_path: torch.nn.CrossEntropyLoss

@@ -1,0 +1,61 @@
+experiment:
+  name: cifar10_fed_dproc_krum_withoutatt
+  seed: 42
+  log_level: INFO
+  save_path: "./results/test/fed_dproc_krum_withoutatt"
+resources:
+  gpus:
+  - 0
+dataset:
+  batch_size: 16
+  train:
+    class_path: fl_framework.data.datasets.CIFAR10Dataset
+    params:
+      data_dir: data_cache
+      train: true
+  test:
+    class_path: fl_framework.data.datasets.CIFAR10Dataset
+    params:
+      data_dir: data_cache
+      train: false
+  partition:
+    iid: true
+    seed: 42
+
+model:
+  class_path: fl_framework.components.models.resnet_18_for_10.ResNet18For10
+  params:
+    in_channels: 3
+
+training:
+  rounds: 100
+  round_steps: 30
+  train_loss_function:
+    class_path: torch.nn.CrossEntropyLoss
+  test_loss_function:
+    class_path: torch.nn.CrossEntropyLoss
+  metrics:
+  - class_path: fl_framework.utils.metrics.TopKAccuracy
+    params:
+      k: 1
+optimizer:
+  class_path: fl_framework.components.optimizers.fed_dproc.FedDPRoC
+  params:
+    lr: 0.1
+    alpha: 1
+    p: 10
+    beta: 0.9
+    clip_threshold: 10.0
+    noise_multiplier: 0.0
+    seed: 42
+aggregator:
+  class_path: fl_framework.components.aggregators.krum.KrumAggregator
+  params:
+    num_byzantine: 0
+honest:
+  num_clients: 16
+byzantine:
+  num_clients: 0
+  attack:
+    class_path: fl_framework.components.attacks.sign_flipping.SignFlipping
+    params: {}
