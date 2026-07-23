@@ -46,13 +46,12 @@ class MiniBatchSampler(BaseSampler):
         self.batch_size = batch_size
         self.shuffle = shuffle
         
-        # Use drop_last=True to ensure all batches have the same size,
-        # which can simplify some computations.
+        # Keep tail batches so small or highly skewed client partitions remain usable.
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size,
             shuffle=self.shuffle,
-            drop_last=True 
+            drop_last=False
         )
         self._iterator: Iterator = iter(self.dataloader)
 
