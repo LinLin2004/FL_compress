@@ -12,21 +12,9 @@ import threading
 # --- 在这里修改你要运行的命令列表 ---
 # 这是一个示例列表，包含了一些会耗费不同时间且可能成功或失败的命令
 COMMANDS_TO_RUN = []
-cfg_dir = '/data-store/xulihan/FL_compress/configs/cfg_byzantine_ratio'
+cfg_dir = 'FL_compress/configs/cfg_batch_size'
 all_configs = sorted([osp.join(cfg_dir, cfg) for cfg in os.listdir(cfg_dir) if cfg.endswith('.yaml')])
-all_configs += [
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2_foe_iid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2_foe_noniid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2_labelflipping_iid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2_labelflipping_noniid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2_signflipping_iid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2_signflipping_noniid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2_withoutatt_iid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2_withoutatt_noniid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2382_labelflipping_noniid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2382_signflipping_noniid.yaml',
-  '/data-store/xulihan/FL_compress/configs/cfg_abl_r/CIFAR10_adamk_compress4_clip_k469_r2382_withoutatt_noniid.yaml',
-]
+all_configs += []
 for config in all_configs:
     cmd = f'python run_experiment.py --config {config}'
     COMMANDS_TO_RUN.append(cmd)

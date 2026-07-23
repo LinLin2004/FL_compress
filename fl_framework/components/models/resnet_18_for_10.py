@@ -27,14 +27,12 @@ class ResNet18For10(nn.Module):
 
         self.backbone = models.resnet18(weights='default' if pretrained else None)
         
-        # *** 撤销上次的修改，让 conv1 期待 3 个输入通道 ***
-        # 因为 CIFAR-10 是 3 通道图像
         self.backbone.conv1 = nn.Conv2d(
-            in_channels=in_channels, # 恢复为 3 通道
+            in_channels=in_channels, 
             out_channels=self.backbone.conv1.out_channels,
             kernel_size=3,
-            stride=self.backbone.conv1.stride,
-            padding=self.backbone.conv1.padding,
+            stride=1,
+            padding=1,
             bias=False
         )
 
