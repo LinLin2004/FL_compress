@@ -12,7 +12,7 @@ import threading
 # --- 在这里修改你要运行的命令列表 ---
 # 这是一个示例列表，包含了一些会耗费不同时间且可能成功或失败的命令
 COMMANDS_TO_RUN = []
-cfg_dir = 'FL_compress/configs/cfg_batch_size'
+cfg_dir = 'configs/cfg_batch_size'
 all_configs = sorted([osp.join(cfg_dir, cfg) for cfg in os.listdir(cfg_dir) if cfg.endswith('.yaml')])
 all_configs += []
 for config in all_configs:
