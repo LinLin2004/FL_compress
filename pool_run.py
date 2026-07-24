@@ -13,7 +13,7 @@ import threading
 # 这是一个示例列表，包含了一些会耗费不同时间且可能成功或失败的命令
 COMMANDS_TO_RUN = []
 cfg_dir = 'configs/cfg_abl_k'
-all_configs = sorted([os.join(cfg_dir, cfg_name) for cfg_name in os.listdir(cfg_dir) if cfg_name.endswith('.yaml')])
+all_configs = sorted([osp.join(cfg_dir, cfg_name) for cfg_name in os.listdir(cfg_dir) if cfg_name.endswith('.yaml')])
 # all_configs = []
 # all_configs += [osp.join(cfg_dir, cfg) for cfg in [
 #     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_foe_iid.yaml',
