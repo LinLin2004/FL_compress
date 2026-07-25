@@ -13,7 +13,7 @@ import datetime
 # --- 在这里修改你要运行的命令列表 ---
 # 这是一个示例列表，包含了一些会耗费不同时间且可能成功或失败的命令
 COMMANDS_TO_RUN = []
-cfg_dir = 'configs/cfg_abl_k'
+cfg_dir = 'configs/cfg_abl_beta1_beta2'
 all_configs = sorted([osp.join(cfg_dir, cfg_name) for cfg_name in os.listdir(cfg_dir) if cfg_name.endswith('.yaml')])
 # all_configs = []
 # all_configs += [osp.join(cfg_dir, cfg) for cfg in [
