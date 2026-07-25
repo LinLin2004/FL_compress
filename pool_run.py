@@ -8,6 +8,7 @@ import time
 import os
 import os.path as osp
 import threading
+import datetime
 
 # --- 在这里修改你要运行的命令列表 ---
 # 这是一个示例列表，包含了一些会耗费不同时间且可能成功或失败的命令
@@ -109,21 +110,43 @@ def run_command(command: str, command_id: int, tracker: ProgressTracker):
     - dict: 包含命令执行结果的字典。
     """
     tracker.on_start(command_id, command)
-    
+
     start_time = time.time()
-    
+
+    # 为每个子进程创建日志文件，保存 stdout 和 stderr
+    log_dir = osp.join(osp.dirname(osp.abspath(__file__)), "results", "pool_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    # 从命令中提取配置文件名作为日志文件名
+    if '--config ' in command:
+        cfg_name = os.path.basename(command.split('--config ')[-1]).replace('.yaml', '')
+    else:
+        cfg_name = f"task_{command_id}"
+    timestamp = datetime.datetime.now().strftime("%m%d_%H%M%S")
+    log_path = osp.join(log_dir, f"{cfg_name}_{timestamp}.log")
+
     try:
         result = subprocess.run(
-            command, 
-            shell=True, 
-            capture_output=True, 
-            text=True, 
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
             check=False
         )
-        
+
         end_time = time.time()
         status = "成功" if result.returncode == 0 else "失败"
-        
+
+        # 将 stdout 和 stderr 写入日志文件
+        with open(log_path, 'w', encoding='utf-8') as f:
+            f.write(f"命令: {command}\n")
+            f.write(f"返回码: {result.returncode}\n")
+            f.write(f"耗时: {end_time - start_time:.1f}s\n")
+            f.write(f"{'='*60}\n")
+            f.write(f"=== STDOUT ===\n")
+            f.write(result.stdout)
+            f.write(f"\n=== STDERR ===\n")
+            f.write(result.stderr)
+
         return {
             "id": command_id,
             "command": command,
@@ -131,10 +154,16 @@ def run_command(command: str, command_id: int, tracker: ProgressTracker):
             "stdout": result.stdout.strip(),
             "stderr": result.stderr.strip(),
             "duration": end_time - start_time,
-            "status": status
+            "status": status,
+            "log_path": log_path,
         }
     except Exception as e:
         end_time = time.time()
+        # 异常也写日志
+        with open(log_path, 'w', encoding='utf-8') as f:
+            f.write(f"命令: {command}\n")
+            f.write(f"Python 异常: {e}\n")
+            f.write(f"耗时: {end_time - start_time:.1f}s\n")
         return {
             "id": command_id,
             "command": command,
@@ -142,7 +171,8 @@ def run_command(command: str, command_id: int, tracker: ProgressTracker):
             "stdout": "",
             "stderr": f"执行时发生 Python 异常: {e}",
             "duration": end_time - start_time,
-            "status": "异常"
+            "status": "异常",
+            "log_path": log_path,
         }
 
 def main():
@@ -205,6 +235,18 @@ def main():
                 f"  任务{res['id']} [{res['status']}] (返回码: {res['return_code']}) {short_cmd} "
                 f"耗时: {res['duration']:.1f}s"
             )
+            # 打印 stderr 的最后几行，方便快速定位问题
+            if res['stderr']:
+                stderr_lines = res['stderr'].splitlines()
+                # 最多显示最后 5 行
+                tail = stderr_lines[-5:] if len(stderr_lines) > 5 else stderr_lines
+                print(f"    stderr (最后{len(tail)}行):")
+                for line in tail:
+                    print(f"      {line}")
+            # 打印日志文件路径，方便查看完整输出
+            log_path = res.get('log_path', '')
+            if log_path and os.path.exists(log_path):
+                print(f"    完整日志: {log_path}")
         print()
 
     print(f"总耗时: {end_total_time - start_total_time:.1f} 秒")
