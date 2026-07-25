@@ -6,3 +6,4 @@ matplotlib
 pandas
 openpyxl
 seaborn
+pytorch_model_summary
