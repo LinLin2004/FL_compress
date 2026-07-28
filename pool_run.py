@@ -13,46 +13,10 @@ import datetime
 # --- 在这里修改你要运行的命令列表 ---
 # 这是一个示例列表，包含了一些会耗费不同时间且可能成功或失败的命令
 COMMANDS_TO_RUN = []
-cfg_dir = 'configs/cfg_abl_beta1_beta2'
+cfg_dir = 'configs/cfg_main_exp'
 all_configs = sorted([osp.join(cfg_dir, cfg_name) for cfg_name in os.listdir(cfg_dir) if cfg_name.endswith('.yaml')])
 # all_configs = []
-# all_configs += [osp.join(cfg_dir, cfg) for cfg in [
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_foe_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_foe_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_foe_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_foe_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_foe_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_foe_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_foe_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_foe_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_foe_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_foe_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_foe_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_foe_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_labelflipping_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_labelflipping_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_labelflipping_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_labelflipping_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_labelflipping_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_labelflipping_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_labelflipping_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_labelflipping_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_labelflipping_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_labelflipping_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_labelflipping_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_labelflipping_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_signflipping_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_signflipping_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs8_signflipping_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_signflipping_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_signflipping_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs16_signflipping_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_signflipping_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_signflipping_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs32_signflipping_strongnoniid_alpha01.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_signflipping_iid.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_signflipping_mildnoniid_alpha05.yaml',
-#     'CIFAR10_adamk_compress4_clip_k469_r2_bs64_signflipping_strongnoniid_alpha01.yaml',
+# all_configs += [
 # ]]
 for config in all_configs:
     cmd = f'python run_experiment.py --config {config}'
@@ -62,7 +26,7 @@ for config in all_configs:
 # --- 在这里修改线程池的大小 ---
 # 线程池的最大工作线程数。可以根据你的 CPU 和任务类型调整。
 # 对于 I/O 密集型任务，可以设置得比 CPU 核心数多。
-MAX_WORKERS = 4
+MAX_WORKERS = 3
 
 
 class ProgressTracker:

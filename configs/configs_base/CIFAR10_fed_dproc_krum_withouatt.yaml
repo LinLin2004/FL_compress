@@ -41,8 +41,8 @@ training:
 optimizer:
   class_path: fl_framework.components.optimizers.fed_dproc.FedDPRoC
   params:
-    lr: 0.1
-    alpha: 1
+    lr: 0.01
+    alpha: 10
     p: 10
     beta: 0.9
     clip_threshold: 10.0

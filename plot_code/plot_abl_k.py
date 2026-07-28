@@ -1,6 +1,9 @@
 import os
 import torch
 import matplotlib.pyplot as plt
+from matplotlib.collections import PolyCollection
+from matplotlib import colors
+from matplotlib.lines import Line2D
 import numpy as np
 import re
 
@@ -18,7 +21,10 @@ def parse_dirname(dirname):
     return k_val, attack, iid_flag
 
 def read_acc_list(folder_path):
-    pth_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.pth')])
+    pth_files = sorted(
+        [f for f in os.listdir(folder_path) if f.endswith('.pth')],
+        key=_checkpoint_sort_key,
+    )
     if not pth_files:
         return []
     # Use the last checkpoint (final round)
@@ -70,9 +76,107 @@ ATTACK_ORDER = ['withoutatt', 'foe', 'labelflipping', 'signflipping']
 def sort_k(k_list):
     return sorted(k_list, key=lambda x: int(x))
 
-# Color and marker maps for different k values
-COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+# Marker maps for different k values
 MARKERS = ['o', 's', '^', 'D', 'v', 'P']
+
+def _checkpoint_sort_key(filename):
+    m = re.match(r'state_round_(\d+).pth', filename)
+    return int(m.group(1)) if m else -1
+
+def _style_3d_axis(ax):
+    ax.computed_zorder = False
+    ax.view_init(elev=25, azim=-55)
+    ax.set_box_aspect((1.35, 1.0, 1.0))
+    ax.xaxis.pane.set_facecolor((0.96, 0.97, 1.00, 0.42))
+    ax.yaxis.pane.set_facecolor((0.95, 1.00, 0.97, 0.34))
+    ax.zaxis.pane.set_facecolor((1.00, 0.98, 0.91, 0.28))
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.pane.set_edgecolor((0.78, 0.80, 0.86, 0.45))
+        axis._axinfo['grid']['color'] = (0.62, 0.66, 0.74, 0.28)
+        axis._axinfo['grid']['linewidth'] = 0.55
+    ax.tick_params(labelsize=8, pad=0)
+
+def _plot_attack_ridge(ax, attack_data, all_k, cmap, norm, k_to_color_index):
+    available_k = [k for k in all_k if k in attack_data]
+    if not available_k:
+        return
+
+    max_len = max(len(attack_data[k]) for k in available_k)
+    all_acc = np.concatenate([np.asarray(attack_data[k], dtype=float) for k in available_k])
+    z_floor = max(0.0, float(np.nanmin(all_acc)) - 0.08)
+    z_top = min(1.0, float(np.nanmax(all_acc)) + 0.08)
+    y_positions = np.arange(len(available_k), dtype=float)
+
+    curve_rows = []
+    for y_pos, k_val in zip(y_positions, available_k):
+        acc = np.asarray(attack_data[k_val], dtype=float)
+        xvals = np.arange(len(acc), dtype=float)
+        color = cmap(norm(k_to_color_index[k_val]))
+        curve_rows.append((y_pos, k_val, xvals, acc, color))
+
+    # Waterfall plots need painter-style ordering in mplot3d: far curtains first,
+    # then nearer curtains so the front faces hide back curves.
+    for y_pos, _, xvals, acc, color in reversed(curve_rows):
+        verts = [[(xvals[0], z_floor), *zip(xvals, acc), (xvals[-1], z_floor)]]
+        poly = PolyCollection(
+            verts,
+            facecolors=[colors.to_rgba(color, 0.28)],
+            edgecolors=[colors.to_rgba(color, 0.74)],
+            linewidths=0.9,
+            zorder=10 + (len(curve_rows) - y_pos) * 3,
+        )
+        ax.add_collection3d(poly, zs=[y_pos], zdir='y')
+
+        ax.plot(xvals, np.full_like(xvals, y_pos), acc,
+                color=color, linewidth=2.35, alpha=0.98,
+                zorder=11 + (len(curve_rows) - y_pos) * 3)
+
+
+    connector_step = max(1, max_len // 5)
+    connector_idx = np.r_[np.arange(0, max_len, connector_step), max_len - 1]
+    connector_idx = np.unique(connector_idx)
+    x_text_pad = max_len * 0.010
+    y_text_pad = 0.014
+    z_text_pad = max((z_top - z_floor) * 0.014, 0.006)
+    for x_idx in connector_idx:
+        connector_points = []
+        for y_pos, _, _, acc, _ in curve_rows:
+            if x_idx < len(acc):
+                connector_points.append((y_pos, float(acc[x_idx])))
+        if len(connector_points) < 2:
+            continue
+        ys, zs = zip(*connector_points)
+        ax.plot(np.full(len(ys), x_idx), ys, zs,
+                color='black', linewidth=1.0, linestyle='--',
+                alpha=0.52, zorder=40)
+        ax.scatter(np.full(len(ys), x_idx), ys, zs,
+                   color='#07198a', edgecolors='none', linewidths=0,
+                   marker='o', s=18, depthshade=False, zorder=42)
+        for y_val, z_val in connector_points:
+            if x_idx <= connector_idx[0]:
+                text_x = x_idx + x_text_pad
+                ha = 'left'
+            elif x_idx >= connector_idx[-1]:
+                text_x = x_idx - x_text_pad
+                ha = 'right'
+            else:
+                text_x = x_idx + x_text_pad * 0.55
+                ha = 'left'
+            text_y = y_val + y_text_pad
+            text_z = min(z_val + z_text_pad, z_top - z_text_pad * 0.25)
+            ax.text(text_x, text_y, text_z,
+                    f'{z_val:.2f}', color='#15172f', fontsize=6.5,
+                    ha=ha, va='bottom', zorder=43)
+
+    ax.set_xlim(0, max_len - 1)
+    ax.set_ylim(-0.45, len(available_k) - 0.55)
+    ax.set_zlim(z_floor, z_top)
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels([f'k={k}' for k in available_k])
+    ax.set_xlabel('Round', fontsize=10, labelpad=6)
+    ax.set_ylabel('k', fontsize=10, labelpad=6)
+    ax.set_zlabel('Accuracy', fontsize=10, labelpad=8)
+    _style_3d_axis(ax)
 
 def plot_figure(data_iid, iid_label, save_path):
     attacks = [a for a in ATTACK_ORDER if a in data_iid]
@@ -85,37 +189,34 @@ def plot_figure(data_iid, iid_label, save_path):
     for attack in attacks:
         all_k.update(data_iid[attack].keys())
     all_k = sort_k(list(all_k))
+    k_to_color_index = {k_val: i for i, k_val in enumerate(all_k)}
 
-    fig, axes = plt.subplots(1, 4, figsize=(24, 5), dpi=300)
+    cmap = plt.get_cmap('viridis')
+    norm = colors.Normalize(vmin=0, vmax=max(1, len(all_k) - 1))
+    fig = plt.figure(figsize=(26, 7.2), dpi=300)
+    axes = [fig.add_subplot(1, 4, i + 1, projection='3d') for i in range(4)]
 
-    for ax_idx, attack in enumerate(attacks):
+    for ax_idx, attack in enumerate(ATTACK_ORDER):
         ax = axes[ax_idx]
-        attack_data = data_iid[attack]
+        if attack in data_iid:
+            _plot_attack_ridge(ax, data_iid[attack], all_k, cmap, norm, k_to_color_index)
+        else:
+            ax.text2D(0.34, 0.5, 'No data', transform=ax.transAxes, fontsize=12)
+            ax.set_axis_off()
+        ax.text2D(0.5, -0.08, ATTACK_DISPLAY.get(attack, attack),
+                  transform=ax.transAxes, ha='center', va='top',
+                  fontsize=15, weight='bold')
 
-        for i, k_val in enumerate(all_k):
-            if k_val not in attack_data:
-                continue
-            acc_list = attack_data[k_val]
-            xvals = np.arange(len(acc_list))
-            color = COLORS[i % len(COLORS)]
-            marker = MARKERS[i % len(MARKERS)]
-            # Plot every 10 epochs with markers, full line in background
-            ax.plot(xvals, acc_list, color=color, label=f'k={k_val}', linewidth=1.5)
-            # Add markers at sampled points
-            step = max(1, len(acc_list) // 10)
-            sample_idx = np.arange(0, len(acc_list), step)
-            ax.plot(sample_idx, [acc_list[j] for j in sample_idx], color=color,
-                    marker=marker, markersize=6, linestyle='None')
+    legend_handles = [
+        Line2D([0], [0], color=cmap(norm(k_to_color_index[k_val])),
+               linewidth=2.6, label=f'k={k_val}')
+        for k_val in all_k
+    ]
+    fig.legend(handles=legend_handles, loc='upper center', ncol=len(all_k),
+               frameon=False, fontsize=11, bbox_to_anchor=(0.5, 0.96),
+               handlelength=2.0, columnspacing=1.6)
 
-        ax.set_title(f'{ATTACK_DISPLAY.get(attack, attack)}', fontsize=18)
-        ax.set_xlabel('Round', fontsize=14)
-        ax.set_ylabel('Accuracy', fontsize=14)
-        ax.tick_params(labelsize=11)
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=11, loc='lower right')
-
-    plt.suptitle(f'Ablation on k ({iid_label})', fontsize=20, y=1.02)
-    plt.tight_layout()
+    plt.subplots_adjust(left=0.02, right=0.98, bottom=0.13, top=0.88, wspace=0.02)
     plt.savefig(save_path, bbox_inches='tight', dpi=300)
     print(f"[INFO] Figure saved to {save_path}")
     plt.close()

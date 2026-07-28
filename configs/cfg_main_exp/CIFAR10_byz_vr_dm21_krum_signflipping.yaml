@@ -1,8 +1,8 @@
 experiment:
-  name: cifar10_adamk_compress4_clip_withoutatt
+  name: cifar10_byz_vr_dm21_krum_signflipping
   seed: 42
   log_level: INFO
-  save_path: "./results_CIFAR10_925/adamk_compress4_clip_zero_gradient_test_multi_krum_proj_comp_62_lr4_delay_0.5"
+  save_path: ./results/results_main_new/cifar10_byz_vr_dm21_krum_signflipping
 resources:
   gpus:
   - 0
@@ -21,12 +21,10 @@ dataset:
   partition:
     iid: true
     seed: 42
-
 model:
   class_path: fl_framework.components.models.resnet_18_for_10.ResNet18For10
   params:
     in_channels: 3
-
 training:
   rounds: 100
   round_steps: 300
@@ -39,26 +37,20 @@ training:
     params:
       k: 1
 optimizer:
-  class_path: fl_framework.components.optimizers.adamk.ADAMK
+  class_path: fl_framework.components.optimizers.byz_dm21.ByzDM21
   params:
-    lr: 6.5e-5
-    beta1: 0.9
-    beta2: 0.999
-    weight_decay: 5.0e-4
-    lr_decay_rate: 0.5
-    lr_decay_milestone: [70]
+    lr: 0.01
+    momentum: 0.9
+    compression_ratio: 0.1
+    use_vr: true
 aggregator:
-  class_path: fl_framework.components.aggregators.compress4_clip.CompressAggregator
+  class_path: fl_framework.components.aggregators.krum.KrumAggregator
   params:
-    m: 4691
-    r: 4
-    k: 750
-    krum_remain: 0.05
-    byzantine_alpha: 0.2
+    num_byzantine: 4
 honest:
   num_clients: 16
 byzantine:
-  num_clients: 0
+  num_clients: 4
   attack:
-    class_path: fl_framework.components.attacks.zero_gradient.ZeroGradientAttack
+    class_path: fl_framework.components.attacks.sign_flipping.SignFlipping
     params: {}

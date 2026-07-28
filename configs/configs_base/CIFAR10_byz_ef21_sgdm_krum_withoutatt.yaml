@@ -2,7 +2,7 @@ experiment:
   name: cifar10_byz_ef21_sgdm_krum_withoutatt
   seed: 42
   log_level: INFO
-  save_path: "./results_CIFAR10_925/byz_ef21_sgdm_krum_zero_gradient"
+  save_path: "./results/test/byz_ef21_sgdm_krum_withoutatt"
 resources:
   gpus:
   - 0
@@ -51,7 +51,7 @@ aggregator:
 honest:
   num_clients: 16
 byzantine:
-  num_clients: 4
+  num_clients: 0
   attack:
     class_path: fl_framework.components.attacks.zero_gradient.ZeroGradientAttack
     params: {}

@@ -1,20 +1,26 @@
-# fl_framework/components/optimizers/byz_ef21_sgdm.py
-"""Byz-EF21-SGDM: Byzantine-robust EF21 with client-side SGDM and Top-k compression.
+# fl_framework/components/optimizers/byz_dm21.py
+"""Byz-DM21 / Byz-VR-DM21: Byzantine-robust distributed momentum with Top-k compression.
 
 Combines:
-  - Client-side stochastic gradient descent with momentum (SGDM)
-  - EF21-style error feedback (compress the *change* Delta = v - g, not v itself)
+  - Client-side dual momentum (v_i raw momentum, u_i auxiliary momentum = EMA of v_i)
+  - Optional variance reduction (Byz-VR-DM21) using the SARAH/SPIDER trick
+  - EF21-style error feedback (compress delta = u_i - g_i, not u_i itself)
   - Top-k sparsifier (keep the k largest-magnitude components)
   - Krum-based robust aggregation on the server (delegated to the aggregator)
 
 Algorithm outline (per round t):
+
   Honest worker i:
     1. Compute stochastic gradient  s_i^(t) = grad l_i(x^(t); xi)
-    2. Update local momentum         v_i^(t) = (1-eta)*v_i^(t-1) + eta*s_i^(t)
-    3. Compute delta                 Delta_i^(t) = v_i^(t) - g_i^(t-1)
-    4. Top-k compress                c_i^(t) = TopK(Delta_i^(t), k)
-    5. Update local estimate         g_i^(t) = g_i^(t-1) + c_i^(t)
-    6. Send c_i^(t) to server
+    2a. (Byz-DM21)  Update raw momentum:  v_i^(t) = (1-eta)*v_i^(t-1) + eta*s_i^(t)
+    2b. (Byz-VR-DM21) Update raw momentum:
+            v_i^(t) = s_i^(t) + (1-eta)*(v_i^(t-1) - s_i^(t-1))
+        where s_i^(t-1) is the gradient at the previous model x^(t-1)
+    3. Update auxiliary momentum:  u_i^(t) = (1-eta)*u_i^(t-1) + eta*v_i^(t)
+    4. Compute delta:  Delta_i^(t) = u_i^(t) - g_i^(t-1)
+    5. Top-k compress:  c_i^(t) = TopK(Delta_i^(t), k)
+    6. Update local estimate:  g_i^(t) = g_i^(t-1) + c_i^(t)
+    7. Send c_i^(t) to server
 
   Byzantine worker j:
     - Computes attack based on honest workers' RAW gradients s_h^(t)
@@ -22,9 +28,9 @@ Algorithm outline (per round t):
       (momentum + EF21 delta + Top-k) to the attack vector and sends c_j^(t)
 
   Server:
-    7. Update global estimates       g_i^(t) = g_i^(t-1) + c_i^(t)   for all i
-    8. Krum aggregate                g^(t) = Krum({g_i^(t)}, f)
-    9. Update model                  x^(t+1) = x^(t) - gamma * g^(t)
+    8. Update global estimates:  g_i^(t) = g_i^(t-1) + c_i^(t)  for all i
+    9. Krum aggregate:  g^(t) = Krum({g_i^(t)}, f)
+   10. Update model:  x^(t+1) = x^(t) - gamma * g^(t)
 
 Key design: Byzantine attacks must see honest clients' raw gradients, not
 compressed deltas.  To achieve this, the AFTER_COMPUTE hook defers writing
@@ -33,7 +39,7 @@ clients have computed their attacks.  The compressed deltas are stored in a
 pending buffer and flushed when the first Byzantine client is processed.
 
 The optimizer uses two hooks:
-  - AFTER_COMPUTE: client-side momentum + EF21 error feedback + Top-k compression
+  - AFTER_COMPUTE: client-side dual momentum + EF21 error feedback + Top-k compression
                    Honest clients: compute compression but defer writing to context.grad
                    so that context.all_honest_gradients still contains raw gradients
                    when Byzantine attacks are computed.
@@ -58,8 +64,10 @@ from .base_optimizer import BaseOptimizer
 from fl_framework.core.hooks import HookType, Context, hook_registry
 
 
-class ByzEF21SGDM(BaseOptimizer):
-    """Byzantine-robust EF21 with client-side SGDM and Top-k compression.
+class ByzDM21(BaseOptimizer):
+    """Byzantine-robust distributed momentum with Top-k compression.
+
+    Implements both Byz-DM21 (use_vr=False) and Byz-VR-DM21 (use_vr=True).
 
     Parameters
     ----------
@@ -67,10 +75,16 @@ class ByzEF21SGDM(BaseOptimizer):
         Global learning rate gamma.  Default 0.01.
     momentum : float
         Momentum coefficient eta (used as the weight for the new gradient).
-        v = (1-eta)*v + eta*s, so eta=0.9 means heavy smoothing.  Default 0.9.
+        v = (1-eta)*v + eta*s, u = (1-eta)*u + eta*v.  Default 0.9.
     compression_ratio : float
         Fraction of dimensions to keep in Top-k, i.e. k = ceil(ratio * d).
         Default 0.1 (keep 10% of components).
+    use_vr : bool
+        If True, use variance-reduced momentum (Byz-VR-DM21):
+            v_i^(t) = s_i^(t) + (1-eta)*(v_i^(t-1) - s_i^(t-1))
+        If False, use standard EMA momentum (Byz-DM21):
+            v_i^(t) = (1-eta)*v_i^(t-1) + eta*s_i^(t)
+        Default False.
     """
 
     def __init__(
@@ -78,27 +92,42 @@ class ByzEF21SGDM(BaseOptimizer):
         lr: float = 0.01,
         momentum: float = 0.9,
         compression_ratio: float = 0.1,
+        use_vr: bool = False,
     ) -> None:
         super().__init__(lr=lr)
         self.momentum = momentum
         self.compression_ratio = compression_ratio
+        self.use_vr = use_vr
 
         # --- Lazy-initialised state (set on first gradient) ---
         self.d: Optional[int] = None           # total gradient dimension
         self.k: Optional[int] = None           # number of components to keep
         self.reference_shapes: Optional[List[torch.Size]] = None
 
-        # Per-client momentum buffers: v_i^(t)
+        # Per-client raw momentum buffers: v_i^(t)
         # Indexed by client_id; each is a flat (d,)-shaped tensor.
-        self._momentum_buffers: List[Optional[torch.Tensor]] = []
+        self._v_buffers: List[Optional[torch.Tensor]] = []
+
+        # Per-client auxiliary momentum buffers: u_i^(t)
+        # u_i^(t) = (1-eta)*u_i^(t-1) + eta*v_i^(t)
+        self._u_buffers: List[Optional[torch.Tensor]] = []
 
         # Per-client EF21 estimate buffers: g_i^(t-1)
-        # These track the server-side estimate of each client's momentum.
+        # These track the client-side estimate of each client's auxiliary momentum.
         self._g_buffers: List[Optional[torch.Tensor]] = []
 
         # Server-side copies of g_i^(t-1), kept in sync with client-side.
         # After compression, the server reconstructs g_i^(t) = g_i^(t-1) + c_i^(t).
         self._server_g_buffers: List[Optional[torch.Tensor]] = []
+
+        # Per-client previous stochastic gradient: s_i^(t-1)
+        # Only used when use_vr=True (Byz-VR-DM21).
+        self._prev_grad_buffers: List[Optional[torch.Tensor]] = []
+
+        # Per-client previous model parameters (flat): x^(t-1)
+        # Only used when use_vr=True, to detect when the model has changed
+        # so we can store the gradient at the old model.
+        self._prev_model_buffers: List[Optional[torch.Tensor]] = []
 
         # Pending compressed deltas for honest clients.
         # Keyed by client_id; each value is a singleton list [flat_tensor]
@@ -130,12 +159,13 @@ class ByzEF21SGDM(BaseOptimizer):
         self.d = flat.numel()
         self.k = max(1, math.ceil(self.compression_ratio * self.d))
 
+        mode_str = "Byz-VR-DM21" if self.use_vr else "Byz-DM21"
         print(
-            f"[Byz-EF21-SGDM] Initialised: d={self.d}, k={self.k}, "
+            f"[{mode_str}] Initialised: d={self.d}, k={self.k}, "
             f"compression_ratio={self.compression_ratio}"
         )
         print(
-            f"[Byz-EF21-SGDM] Top-k keeps {self.k}/{self.d} components "
+            f"[{mode_str}] Top-k keeps {self.k}/{self.d} components "
             f"({self.k / self.d * 100:.1f}%)"
         )
 
@@ -179,66 +209,22 @@ class ByzEF21SGDM(BaseOptimizer):
         return result
 
     # ------------------------------------------------------------------
-    # Shared compression pipeline
+    # Helper: get current model as flat vector
     # ------------------------------------------------------------------
 
+    @staticmethod
     @torch.no_grad()
-    def _compress_gradient(
-        self, client_id: int, client_grad: List[torch.Tensor]
-    ) -> torch.Tensor:
-        """Run the full compression pipeline on a gradient (raw or attack).
-
-        This is shared by both honest and Byzantine clients:
-          1. Flatten to (d,) vector
-          2. Update local momentum: v_i^(t) = (1-eta)*v_i^(t-1) + eta*s_i^(t)
-          3. Compute EF21 delta: Delta_i^(t) = v_i^(t) - g_i^(t-1)
-          4. Top-k compress: c_i^(t) = TopK(Delta_i^(t), k)
-          5. Update local estimate: g_i^(t) = g_i^(t-1) + c_i^(t)
-
-        Returns the compressed delta c_i^(t) as a flat (d,)-tensor.
-        """
-        device = client_grad[0].device
-        flat_grad = self._flatten(client_grad).to(device)  # s_i^(t)
-
-        # 1. Update local momentum: v_i^(t) = (1-eta)*v_i^(t-1) + eta*s_i^(t)
-        v_buf = self._momentum_buffers[client_id]
-        if v_buf is None:
-            # First iteration: v_i^(0) = s_i^(0)
-            v_buf = flat_grad.clone()
-        else:
-            v_buf = v_buf.to(device)
-            v_buf.mul_(1.0 - self.momentum).add_(flat_grad, alpha=self.momentum)
-        self._momentum_buffers[client_id] = v_buf
-
-        # 2. Compute delta: Delta_i^(t) = v_i^(t) - g_i^(t-1)
-        g_buf = self._g_buffers[client_id]
-        if g_buf is None:
-            # g_i^(-1) = 0, so Delta = v
-            delta = v_buf.clone()
-        else:
-            g_buf = g_buf.to(device)
-            delta = v_buf - g_buf
-
-        # 3. Top-k compress: c_i^(t) = TopK(Delta_i^(t), k)
-        c = self._topk(delta, self.k)
-
-        # 4. Update local estimate: g_i^(t) = g_i^(t-1) + c_i^(t)
-        if g_buf is None:
-            g_buf = c.clone()
-        else:
-            g_buf = g_buf.to(device)
-            g_buf.add_(c)
-        self._g_buffers[client_id] = g_buf
-
-        return c
+    def _get_flat_model(model) -> torch.Tensor:
+        """Get the current model parameters as a flat vector."""
+        return torch.cat([p.data.reshape(-1) for p in model.parameters()])
 
     # ------------------------------------------------------------------
-    # Hook 1 — AFTER_COMPUTE: client-side momentum + EF21 + Top-k
+    # Hook 1 — AFTER_COMPUTE: client-side dual momentum + EF21 + Top-k
     # ------------------------------------------------------------------
 
     @torch.no_grad()
     def _client_process(self, context: Context) -> None:
-        """Per-client processing: momentum update, EF21 error feedback, Top-k.
+        """Per-client processing: dual momentum update, EF21 error feedback, Top-k.
 
         Honest clients:
           Compute the full compression pipeline (momentum → delta → Top-k),
@@ -265,10 +251,17 @@ class ByzEF21SGDM(BaseOptimizer):
             self._lazy_init(client_grad, client_grad[0].device)
 
         # --- Ensure buffer lists are large enough ---
-        while len(self._momentum_buffers) <= client_id:
-            self._momentum_buffers.append(None)
+        while len(self._v_buffers) <= client_id:
+            self._v_buffers.append(None)
+        while len(self._u_buffers) <= client_id:
+            self._u_buffers.append(None)
         while len(self._g_buffers) <= client_id:
             self._g_buffers.append(None)
+        if self.use_vr:
+            while len(self._prev_grad_buffers) <= client_id:
+                self._prev_grad_buffers.append(None)
+            while len(self._prev_model_buffers) <= client_id:
+                self._prev_model_buffers.append(None)
 
         # --- Byzantine client: compress attack output, then flush pending ---
         if client.client_type == "Byzantine":
@@ -292,6 +285,84 @@ class ByzEF21SGDM(BaseOptimizer):
         # so that context.all_honest_gradients still contains raw gradients
         # when Byzantine attacks are computed later.
         self._pending_compressed[client_id] = [c]
+
+    @torch.no_grad()
+    def _compress_gradient(
+        self, client_id: int, client_grad: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """Run the full compression pipeline on a gradient (raw or attack).
+
+        This is shared by both honest and Byzantine clients:
+          1. Flatten to (d,) vector
+          2. Update raw momentum v_i^(t)
+          3. Update auxiliary momentum u_i^(t)
+          4. Compute EF21 delta: Delta_i^(t) = u_i^(t) - g_i^(t-1)
+          5. Top-k compress: c_i^(t) = TopK(Delta_i^(t), k)
+          6. Update local estimate: g_i^(t) = g_i^(t-1) + c_i^(t)
+
+        Returns the compressed delta c_i^(t) as a flat (d,)-tensor.
+        """
+        device = client_grad[0].device
+        flat_grad = self._flatten(client_grad).to(device)  # s_i^(t)
+
+        # 1. Update raw momentum v_i^(t)
+        v_buf = self._v_buffers[client_id]
+        if v_buf is None:
+            # First iteration: v_i^(0) = s_i^(0)
+            v_buf = flat_grad.clone()
+        else:
+            v_buf = v_buf.to(device)
+            if self.use_vr:
+                # Byz-VR-DM21: v_i^(t) = s_i^(t) + (1-eta)*(v_i^(t-1) - s_i^(t-1))
+                prev_grad = self._prev_grad_buffers[client_id]
+                if prev_grad is None:
+                    # First step with VR: no previous gradient, fall back to
+                    # v_i^(0) = s_i^(0) (same as non-VR initialization)
+                    v_buf = flat_grad.clone()
+                else:
+                    prev_grad = prev_grad.to(device)
+                    # v = s_new + (1-eta)*(v_old - s_old)
+                    v_buf = flat_grad + (1.0 - self.momentum) * (v_buf - prev_grad)
+            else:
+                # Byz-DM21: v_i^(t) = (1-eta)*v_i^(t-1) + eta*s_i^(t)
+                v_buf.mul_(1.0 - self.momentum).add_(flat_grad, alpha=self.momentum)
+        self._v_buffers[client_id] = v_buf
+
+        # Store current gradient as previous for next step (VR mode)
+        if self.use_vr:
+            self._prev_grad_buffers[client_id] = flat_grad.clone()
+
+        # 2. Update auxiliary momentum: u_i^(t) = (1-eta)*u_i^(t-1) + eta*v_i^(t)
+        u_buf = self._u_buffers[client_id]
+        if u_buf is None:
+            # First iteration: u_i^(0) = v_i^(0)
+            u_buf = v_buf.clone()
+        else:
+            u_buf = u_buf.to(device)
+            u_buf.mul_(1.0 - self.momentum).add_(v_buf, alpha=self.momentum)
+        self._u_buffers[client_id] = u_buf
+
+        # 3. Compute delta: Delta_i^(t) = u_i^(t) - g_i^(t-1)
+        g_buf = self._g_buffers[client_id]
+        if g_buf is None:
+            # g_i^(-1) = 0, so Delta = u
+            delta = u_buf.clone()
+        else:
+            g_buf = g_buf.to(device)
+            delta = u_buf - g_buf
+
+        # 4. Top-k compress: c_i^(t) = TopK(Delta_i^(t), k)
+        c = self._topk(delta, self.k)
+
+        # 5. Update local estimate: g_i^(t) = g_i^(t-1) + c_i^(t)
+        if g_buf is None:
+            g_buf = c.clone()
+        else:
+            g_buf = g_buf.to(device)
+            g_buf.add_(c)
+        self._g_buffers[client_id] = g_buf
+
+        return c
 
     # ------------------------------------------------------------------
     # Hook 2 — BEFORE_AGGREGATE: server-side reconstruction of g_i^(t)
@@ -365,8 +436,9 @@ class ByzEF21SGDM(BaseOptimizer):
             selected by Krum (the winning client's g_i^(t)).
         """
         if server is None or aggregated_grad is None:
+            mode_str = "Byz-VR-DM21" if self.use_vr else "Byz-DM21"
             print(
-                "[Byz-EF21-SGDM] Warning: server or aggregated_grad is None, "
+                f"[{mode_str}] Warning: server or aggregated_grad is None, "
                 "skipping update."
             )
             return
@@ -393,16 +465,24 @@ class ByzEF21SGDM(BaseOptimizer):
             "lr": self.lr,
             "momentum": self.momentum,
             "compression_ratio": self.compression_ratio,
+            "use_vr": self.use_vr,
             "d": self.d,
             "k": self.k,
             "reference_shapes": self.reference_shapes,
         }
 
-        # Momentum buffers — move to CPU for serialisation.
-        if self._momentum_buffers:
-            state["momentum_buffers"] = [
+        # v buffers — move to CPU for serialisation.
+        if self._v_buffers:
+            state["v_buffers"] = [
                 buf.cpu().clone() if buf is not None else None
-                for buf in self._momentum_buffers
+                for buf in self._v_buffers
+            ]
+
+        # u buffers
+        if self._u_buffers:
+            state["u_buffers"] = [
+                buf.cpu().clone() if buf is not None else None
+                for buf in self._u_buffers
             ]
 
         # Client-side g buffers
@@ -419,6 +499,13 @@ class ByzEF21SGDM(BaseOptimizer):
                 for buf in self._server_g_buffers
             ]
 
+        # Previous gradient buffers (VR mode)
+        if self.use_vr and self._prev_grad_buffers:
+            state["prev_grad_buffers"] = [
+                buf.cpu().clone() if buf is not None else None
+                for buf in self._prev_grad_buffers
+            ]
+
         return state
 
     def set_state(self, state: dict) -> None:
@@ -426,14 +513,21 @@ class ByzEF21SGDM(BaseOptimizer):
         self.lr = state.get("lr", self.lr)
         self.momentum = state.get("momentum", self.momentum)
         self.compression_ratio = state.get("compression_ratio", self.compression_ratio)
+        self.use_vr = state.get("use_vr", self.use_vr)
         self.d = state.get("d")
         self.k = state.get("k")
         self.reference_shapes = state.get("reference_shapes")
 
-        raw_mom = state.get("momentum_buffers")
-        if raw_mom is not None:
-            self._momentum_buffers = [
-                buf.clone() if buf is not None else None for buf in raw_mom
+        raw_v = state.get("v_buffers")
+        if raw_v is not None:
+            self._v_buffers = [
+                buf.clone() if buf is not None else None for buf in raw_v
+            ]
+
+        raw_u = state.get("u_buffers")
+        if raw_u is not None:
+            self._u_buffers = [
+                buf.clone() if buf is not None else None for buf in raw_u
             ]
 
         raw_g = state.get("g_buffers")
@@ -447,3 +541,10 @@ class ByzEF21SGDM(BaseOptimizer):
             self._server_g_buffers = [
                 buf.clone() if buf is not None else None for buf in raw_sg
             ]
+
+        if self.use_vr:
+            raw_pg = state.get("prev_grad_buffers")
+            if raw_pg is not None:
+                self._prev_grad_buffers = [
+                    buf.clone() if buf is not None else None for buf in raw_pg
+                ]

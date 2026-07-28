@@ -5,11 +5,12 @@ Combines Count-Sketch compression, differential privacy noise, client-side
 momentum, and Krum-based robust aggregation in a single optimizer.
 
 The optimizer uses two hooks:
-  - AFTER_COMPUTE: gradient clipping, Gaussian noise, momentum update
-                   (honest clients only; Byzantine clients are left untouched
-                    so attacks can read all_honest_gradients)
-  - BEFORE_AGGREGATE: Count-Sketch compress ALL clients to k-dim vectors
-                      (fires after all_honest_gradients has been set)
+  - AFTER_COMPUTE: lazy initialisation only. Gradients are deliberately left
+                   untouched here so attacks read raw honest gradients from
+                   context.all_honest_gradients.
+  - BEFORE_AGGREGATE: gradient clipping, Gaussian noise, momentum update for
+                      honest clients, then Count-Sketch compression for ALL
+                      clients.
 """
 
 from __future__ import annotations
@@ -207,20 +208,20 @@ class FedDPRoC(BaseOptimizer):
         return result
 
     # ------------------------------------------------------------------
-    # Hook 1 — AFTER_COMPUTE: clip, noise, momentum (honest clients only)
+    # Hook 1 — AFTER_COMPUTE: lazy init only
     # ------------------------------------------------------------------
 
     @torch.no_grad()
     def _client_process(self, context: Context) -> None:
-        """Per-client processing: gradient clipping, Gaussian noise, momentum.
+        """Initialise optimizer state without modifying the computed gradient.
 
-        Honest clients get the full pipeline.  Byzantine clients are skipped
-        so that their attack output remains uncompressed in *context.grad*;
-        this is required because later Byzantine clients may read
-        *context.all_honest_gradients* during their attack.
+        The coordinator snapshots ``context.all_honest_gradients`` after all
+        honest clients complete their ``AFTER_COMPUTE`` hooks.  Therefore this
+        hook must not overwrite ``context.grad``; otherwise FOE-like attacks
+        would be based on clipped/noised/momentum gradients instead of raw
+        backward gradients.
         """
         client_id = context.current_client_id
-        client = context.clients[client_id]
         client_grad = context.grad[client_id]
 
         # --- Lazy init on first call ---
@@ -231,11 +232,18 @@ class FedDPRoC(BaseOptimizer):
         while len(self.momentum_buffers) <= client_id:
             self.momentum_buffers.append(None)
 
-        # --- Byzantine clients: leave gradient untouched ---
-        if client.client_type == "Byzantine":
-            return
+    # ------------------------------------------------------------------
+    # Deferred honest-client processing
+    # ------------------------------------------------------------------
 
-        # --- Honest client processing ---
+    @torch.no_grad()
+    def _process_honest_gradient(
+        self,
+        client_id: int,
+        client_grad: List[torch.Tensor],
+        client,
+    ) -> List[torch.Tensor]:
+        """Apply clipping, optional DP noise and momentum to one honest gradient."""
         device = client_grad[0].device
         flat = self._flatten(client_grad).to(device)
 
@@ -267,18 +275,18 @@ class FedDPRoC(BaseOptimizer):
 
         buf.mul_(self.beta).add_(flat, alpha=(1.0 - self.beta))
 
-        # Write processed (uncompressed) gradient back
-        context.grad[client_id] = self._unflatten(buf)
+        return self._unflatten(buf)
 
     # ------------------------------------------------------------------
-    # Hook 2 — BEFORE_AGGREGATE: compress all clients to k-dim
+    # Hook 2 — BEFORE_AGGREGATE: process honest clients, then compress all
     # ------------------------------------------------------------------
 
     @torch.no_grad()
     def _compress_all(self, context: Context) -> None:
-        """Compress every client's gradient list to a single k-dimensional
-        tensor so that the aggregator (e.g. Krum) operates in the compressed
-        space.
+        """Process honest gradients, then compress every client's message.
+
+        Honest gradients are processed here instead of in ``AFTER_COMPUTE`` so
+        Byzantine attacks have already consumed raw honest gradients.
 
         Each ``context.grad[i]`` is replaced by ``[k_tensor]`` — a singleton
         list so the interface ``List[List[Tensor]]`` expected by aggregators
@@ -288,6 +296,11 @@ class FedDPRoC(BaseOptimizer):
             g = context.grad[i]
             if g is None:
                 continue
+
+            client = context.clients[i]
+            if client.client_type != "Byzantine":
+                g = self._process_honest_gradient(i, g, client)
+                context.grad[i] = g
 
             flat = self._flatten(g)                   # (d,)
             compressed = self._compress(flat)          # (k,)
