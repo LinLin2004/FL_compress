@@ -27,7 +27,7 @@ model:
     in_channels: 3
 training:
   rounds: 100
-  round_steps: 30
+  round_steps: 300
   train_loss_function:
     class_path: torch.nn.CrossEntropyLoss
   test_loss_function:
