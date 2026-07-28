@@ -26,7 +26,7 @@ for config in all_configs:
 # --- 在这里修改线程池的大小 ---
 # 线程池的最大工作线程数。可以根据你的 CPU 和任务类型调整。
 # 对于 I/O 密集型任务，可以设置得比 CPU 核心数多。
-MAX_WORKERS = 3
+MAX_WORKERS = 4
 
 
 class ProgressTracker:
