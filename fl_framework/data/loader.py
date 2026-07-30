@@ -3,12 +3,14 @@ from torch.utils.data import Subset
 from typing import List
 from .base_dataset import BaseFLDataset
 
+
 def partition_dataset(
     dataset: BaseFLDataset,
     num_clients: int,
     iid: bool = False,  # 默认 Non-IID
     seed: int = 42,
-    alpha: float = 0.2
+    alpha: float = 0.2,
+    by_writer: bool = False
 ) -> List[Subset]:
     """
     Partitions a given dataset object among multiple clients.
@@ -18,20 +20,91 @@ def partition_dataset(
         num_clients (int): 客户端数量.
         iid (bool): True 表示 IID，False 表示按标签 Non-IID.
         seed (int): 随机种子.
-        shards_per_client (int): Non-IID 模式下每个客户端的 shard 数量.
+        alpha (float): Dirichlet 分布的浓度参数.
+        by_writer (bool): True 表示按数据集自带的 writer 划分分区
+            （仅适用于 FedMnistDataset 等支持 client_indices 的数据集）.
 
     Returns:
         List[Subset]: 按客户端划分好的 Subset 列表.
     """
-    if iid:
+    if by_writer:
+        partitions = _partition_by_writer(dataset, num_clients, seed)
+    elif iid:
         partitions = _partition_iid(dataset, num_clients, seed)
     else:
         partitions = _partition_non_iid(
             dataset, num_clients, seed, alpha
         )
 
-    print(f"Partitioned dataset into {len(partitions)} {'IID' if iid else 'Non-IID'} subsets.")
+    print(f"Partitioned dataset into {len(partitions)} "
+          f"{'by-writer' if by_writer else ('IID' if iid else 'Non-IID')} subsets.")
     return partitions
+
+
+def _partition_by_writer(
+    dataset: BaseFLDataset,
+    num_clients: int,
+    seed: int
+) -> List[Subset]:
+    """
+    按数据集自带的 writer（写作者）划分分区。
+
+    适用于 FedMnistDataset 等具有 client_indices 属性的数据集。
+    当 writer 数量多于 num_clients 时，将多个 writer 合并到一个客户端；
+    当 writer 数量少于 num_clients 时，报错提示。
+
+    Args:
+        dataset (BaseFLDataset): 具有 client_indices 属性的数据集.
+        num_clients (int): 客户端数量.
+        seed (int): 随机种子.
+
+    Returns:
+        List[Subset]: 按客户端划分好的 Subset 列表.
+    """
+    if not hasattr(dataset, 'client_indices'):
+        raise ValueError(
+            "Dataset does not support by_writer partitioning. "
+            "It must have a 'client_indices' property (e.g., FedMnistDataset)."
+        )
+
+    writer_indices = dataset.client_indices
+    num_writers = len(writer_indices)
+
+    if num_writers < num_clients:
+        raise ValueError(
+            f"Number of writers ({num_writers}) is less than num_clients ({num_clients}). "
+            f"Cannot partition by writer with more clients than writers."
+        )
+
+    # Shuffle writer order for randomness
+    rng = np.random.default_rng(seed)
+    writer_order = list(range(num_writers))
+    rng.shuffle(writer_order)
+
+    # Distribute writers to clients
+    # Each client gets at least num_writers // num_clients writers,
+    # and the first (num_writers % num_clients) clients get one extra writer
+    writers_per_client = [num_writers // num_clients] * num_clients
+    for i in range(num_writers % num_clients):
+        writers_per_client[i] += 1
+
+    client_subsets = []
+    writer_offset = 0
+    for i in range(num_clients):
+        # Get the writer indices assigned to this client
+        assigned_writers = writer_order[writer_offset:writer_offset + writers_per_client[i]]
+        writer_offset += writers_per_client[i]
+
+        # Merge all sample indices from assigned writers
+        sample_indices = []
+        for w in assigned_writers:
+            sample_indices.extend(writer_indices[w])
+
+        # Shuffle sample indices within each client
+        rng.shuffle(sample_indices)
+        client_subsets.append(Subset(dataset, sample_indices))
+
+    return client_subsets
 
 
 def _partition_iid(dataset: BaseFLDataset, num_clients: int, seed: int) -> List[Subset]:

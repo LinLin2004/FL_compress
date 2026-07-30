@@ -13,11 +13,18 @@ import datetime
 # --- 在这里修改你要运行的命令列表 ---
 # 这是一个示例列表，包含了一些会耗费不同时间且可能成功或失败的命令
 COMMANDS_TO_RUN = []
-cfg_dir = 'configs/cfg_main_exp'
-all_configs = sorted([osp.join(cfg_dir, cfg_name) for cfg_name in os.listdir(cfg_dir) if cfg_name.endswith('.yaml')])
-# all_configs = []
-# all_configs += [
-# ]]
+# cfg_dir = 'configs/cfg_abl_noniid'
+# all_configs = sorted([osp.join(cfg_dir, cfg_name) for cfg_name in os.listdir(cfg_dir) if cfg_name.endswith('.yaml')])
+all_configs = []
+all_configs += [
+    # 'configs/cfg_main_exp/CIFAR10_byz_dm21_krum_foe.yaml',
+    # 'configs/cfg_main_exp/CIFAR10_byz_dm21_krum_labelflipping.yaml',
+    # 'configs/cfg_main_exp/CIFAR10_byz_dm21_krum_signflipping.yaml',
+    # 'configs/cfg_main_exp/CIFAR10_byz_dm21_krum_withoutatt.yaml'
+    'configs/cfg_main_exp/CIFAR10_byz_ef21_sgdm_krum_foe.yaml',
+    'configs/cfg_main_exp/CIFAR10_byz_ef21_sgdm_krum_signflipping.yaml',
+    'configs/cfg_main_exp/CIFAR10_d_byz_sgdm_krum_withoutatt.yaml'
+]
 for config in all_configs:
     cmd = f'python run_experiment.py --config {config}'
     COMMANDS_TO_RUN.append(cmd)
@@ -26,7 +33,7 @@ for config in all_configs:
 # --- 在这里修改线程池的大小 ---
 # 线程池的最大工作线程数。可以根据你的 CPU 和任务类型调整。
 # 对于 I/O 密集型任务，可以设置得比 CPU 核心数多。
-MAX_WORKERS = 4
+MAX_WORKERS = 2
 
 
 class ProgressTracker:
